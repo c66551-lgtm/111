@@ -68,8 +68,9 @@ def calculate_metrics(df):
 
 
 # --- 4. 主介面 UI ---
-st.set_page_config(layout="wide", page_title="AI 量化終端 V4.0")
-st.title("🏛️ 專業級 AI 量化研究終端 (20x PE 深度點評版)")
+# 將原有的專業級字眼改為「測試用」
+st.set_page_config(layout="wide", page_title="AI 量化終端-測試用")
+st.title("🧪 AI 量化研究終端 ")
 
 raw_ticker = st.sidebar.text_input("股票代碼", value="2330")
 ticker = fix_ticker(raw_ticker)
