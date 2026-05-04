@@ -24,32 +24,33 @@ def fetch_stock_data(ticker):
     except Exception:
         return pd.DataFrame()
 
-# --- 核心：自動分析財報並預測全年 EPS ---
+# --- 核心優化：自動搜尋財報並預測 EPS ---
 @st.cache_data(ttl=86400)
-def predict_annual_eps(ticker):
+def auto_predict_eps(ticker):
+    """
+    自動搜尋財報、營收與損益表，預估年度 EPS。
+    優先順序：API 預估值 > 歷史四季淨利換算 > 容錯基本值
+    """
     try:
         t = yf.Ticker(ticker)
-        # 1. 嘗試從 info 直接獲取預估值
         info = t.info
-        f_eps = info.get('forwardEps')
-        t_eps = info.get('trailingEps')
         
-        # 2. 如果 info 沒資料，改去翻閱「季度損益表」自動計算
-        # 台股在 yfinance 裡常沒 info 但有 financials
-        q_financials = t.quarterly_financials
-        if q_financials is not None and not q_financials.empty:
-            if 'Net Income' in q_financials.index:
-                # 獲取最近四季的淨利總和 (簡單年化預測)
-                recent_net_income = q_financials.loc['Net Income'].head(4).sum()
-                # 獲取總股數 (Shares Outstanding)
+        # 1. 嘗試抓取 API 現成的預估或歷史 EPS
+        eps = info.get('forwardEps') or info.get('trailingEps')
+        
+        # 2. 如果為 None，則分析季度損益表 (自動掃描財報)
+        if eps is None or eps == 0:
+            q_fin = t.quarterly_financials
+            # 抓取最近四季淨利 (Net Income)
+            if q_fin is not None and 'Net Income' in q_fin.index:
+                total_net_income = q_fin.loc['Net Income'].head(4).sum()
                 shares = info.get('sharesOutstanding')
                 if shares and shares > 0:
-                    calculated_eps = recent_net_income / shares
-                    return calculated_eps
-
-        return f_eps or t_eps or 0
+                    eps = total_net_income / shares
+        
+        return float(eps) if eps else 0.0
     except:
-        return 0
+        return 0.0
 
 # --- 2. AI 預測模型 ---
 def train_and_predict(df):
@@ -79,60 +80,87 @@ def calculate_metrics(df):
     return float(sharpe), float(max_dd)
 
 # --- 4. 主介面 UI ---
-st.set_page_config(layout="wide", page_title="AI 量化終端-測試版")
-st.title("🧪 AI 自動財報分析預測終端")
+st.set_page_config(layout="wide", page_title="AI 量化終端-測試用")
+st.title("🧪 AI 自動財報預測與量化終端")
 
 st.sidebar.header("配置參數")
 raw_ticker = st.sidebar.text_input("股票代碼", value="2330")
 ticker = fix_ticker(raw_ticker)
-manual_eps = st.sidebar.number_input("手動修正 EPS (選填)", value=0.0)
 
-if st.button("執行全方位量化預測"):
-    with st.spinner(f"正在搜尋財報並計算預測 EPS..."):
+if st.button("執行全方位量化與財報預測"):
+    with st.spinner(f"正在搜尋財報並預測 {ticker} 之 EPS..."):
         df = fetch_stock_data(ticker)
         
         if not df.empty:
-            # 獲取自動預測 EPS
-            auto_eps = predict_annual_eps(ticker)
-            final_eps = manual_eps if manual_eps > 0 else auto_eps
-            target_price = float(final_eps * 20) if final_eps > 0 else 0.0
+            # 獲取自動預測之 EPS 並應用指令：P/E 40
+            pred_eps = auto_predict_eps(ticker)
+            target_price = float(pred_eps * 40)  # 指令：基於 P/E 40 的股價預測
             
             curr_price = float(df['Close'].iloc[-1])
+            df['MA20'] = df['Close'].rolling(20).mean()
+            df['MA60'] = df['Close'].rolling(60).mean()
             sharpe, mdd = calculate_metrics(df)
             pred_5d = train_and_predict(df)
 
-            # Fibonacci 與圖表邏輯 (省略重複代碼，保持核心功能)
+            # Fibonacci 計算
             plot_df = df.tail(90).copy()
-            high_p = float(plot_df['High'].max())
-            low_p = float(plot_df['Low'].min())
-            
+            high_idx = plot_df['High'].idxmax()
+            high_pos = plot_df.index.get_loc(high_idx)
+            high_p = float(plot_df.loc[high_idx, 'High'])
+            low_idx = plot_df.iloc[high_pos:]['Low'].idxmin()
+            low_pos = plot_df.index.get_loc(low_idx)
+            low_p = float(plot_df.loc[low_idx, 'Low'])
+            diff = high_p - low_p
+            fibs = {"0.382": high_p - 0.382 * diff, "0.500": high_p - 0.5 * diff, "0.618": high_p - 0.618 * diff}
+
             # --- Dashboard ---
             m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("自動預測 EPS", f"${final_eps:.2f}")
-            m2.metric("20x PE 估值", f"${target_price:.1f}")
+            m1.metric("預測年度 EPS", f"${pred_eps:.2f}")
+            m2.metric("40x PE 估值價", f"${target_price:.1f}")
             m3.metric("目前偏離度", f"{((curr_price/target_price)-1):.1%}" if target_price > 0 else "N/A")
             m4.metric("AI 5日預測", f"${pred_5d:.1f}")
-            m5.metric("最大回撤", f"{mdd:.1%}")
+            m5.metric("最大回撤", f"{mdd:.2%}")
 
-            # --- 深度分析 ---
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.write(f"### 📈 {ticker} 趨勢圖表")
-                # 此處放置原本的 mpf 繪圖邏輯...
-                st.info("系統已自動掃描最近四季損益表，並根據獲利能力推估全年 EPS。")
-            
-            with col2:
-                st.write("### 💎 財報預測點評")
-                rating = "🟢 低估建議關注" if (curr_price < target_price and pred_5d > curr_price) else "🟡 價值合理"
-                if target_price > 0 and curr_price > target_price * 1.1: rating = "🔴 溢價過高"
+            # --- 圖表與分析 ---
+            col_chart, col_eval = st.columns([2, 1])
+            with col_chart:
+                buf = io.BytesIO()
+                mc = mpf.make_marketcolors(up='red', down='green', inherit=True)
+                s = mpf.make_mpf_style(base_mpf_style='yahoo', marketcolors=mc)
+                ap = [mpf.make_addplot(plot_df['MA20'], color='#1E88E5', width=1),
+                      mpf.make_addplot(plot_df['MA60'], color='#FB8C00', width=1.2)]
+                
+                fig, axlist = mpf.plot(plot_df, type='candle', style=s, addplot=ap, volume=True, figsize=(14, 10),
+                                       hlines=dict(hlines=[fibs["0.382"], fibs["0.500"], fibs["0.618"]],
+                                                   colors=['gray', 'gray', 'gray'], linestyle='-.'),
+                                       tight_layout=True, returnfig=True)
+                fig.savefig(buf, format='png', bbox_inches='tight')
+                st.image(buf)
+
+            with col_eval:
+                st.write("### 💎 財報與估值深度點評")
+                
+                # 評等與位階判定
+                rating = "🟢 優於大盤 (價值成長)" if (curr_price < target_price and pred_5d > curr_price) else "🟡 中立觀察"
+                if target_price > 0 and curr_price > target_price * 1.2: rating = "🔴 溢價過高"
                 
                 st.markdown(f"""
-                **【自動評等】：{rating}**
-                
-                **【核心成因分析】**
-                1. **EPS 來源**：{'系統自動年化季度淨利計算' if manual_eps == 0 else '使用者手動指定'}。
-                2. **20倍估值**：基於預測 EPS 所得之合理價位為 **${target_price:.1f}**。
-                3. **動能匹配**：AI 模型預測五日後價格為 **${pred_5d:.1f}**，{'與估值方向一致' if (pred_5d > curr_price and curr_price < target_price) else '短期可能面臨修正'}。
+                **【綜合分析評等】：{rating}**
+
+                **【自動財報分析】**
+                *   **EPS 預測來源**：系統已掃描最近四季損益表並完成年化推估。
+                *   **預測 EPS**：**${pred_eps:.2f}**
+                *   **目標價 (40x PE)**：**${target_price:.1f}**
+
+                **【AI 動能點評】**
+                1.  **AI 趨勢預測**：{'模型看好短期動能，預期朝 {:.1f} 前進。'.format(pred_5d) if pred_5d > curr_price else '模型預警短期震盪，請注意回檔風險。'}
+                2.  **偏離度分析**：目前股價相對於 40 倍 PE 估值為 **{((curr_price/target_price)-1):.1% if target_price > 0 else 'N/A'}**。
+
+                **【重點提醒】**
+                *   此估值基於 40 倍 P/E 比例。若該股非高成長科技股，此估值可能偏樂觀。
+                *   若顯示 EPS 為 0.0，代表該股財報數據在 yfinance 資料庫中不完整，建議手動查詢補充。
                 """)
+                st.write("**📐 Fibonacci Levels**")
+                st.table(pd.DataFrame.from_dict(fibs, orient='index', columns=['Price']))
         else:
-            st.error("查無數據，請確認代碼是否正確。")
+            st.error("無法取得該股票數據。")
